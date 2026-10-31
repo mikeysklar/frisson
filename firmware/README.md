@@ -24,7 +24,7 @@ D5 sends a 15 MHz clock to the TLV320's MCLK pin. The TLV320's PLL locks to it. 
 ## Setup
 
 1. Install the libraries: `circup install adafruit_tlv320 adafruit_seesaw`
-2. Copy `code.py`, `fonts/` and everything in `lib/` to the CIRCUITPY drive. `lib/adafruit_flac/` is a build of [Adafruit_CircuitPython_FLAC](https://github.com/adafruit/Adafruit_CircuitPython_FLAC) with `seek()` added, for rewind and fast-forward. Use it in place of the released library.
+2. Copy `code.py`, `fonts/` and everything in `lib/` to the CIRCUITPY drive. `lib/adafruit_flac/` is a build of [Adafruit_CircuitPython_FLAC](https://github.com/adafruit/Adafruit_CircuitPython_FLAC) with `seek()` added, for rewind and fast-forward, and `flac_native`, a C decode kernel that loads on stock firmware and falls back to viper. Use it in place of the released library.
 3. Put your music on the card, one folder per album.
 
 The first start reads every file's tags into `/FRISSON.IDX` on the card. Delete it after changing the music.

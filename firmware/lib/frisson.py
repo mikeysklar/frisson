@@ -23,13 +23,14 @@ import menus
 from audiobuf import audio, out_buf
 
 LEVEL = 0.5  # FLACPlayer output level, 0.0 to 1.0
-DAC_DB = -16  # TLV320 DAC volume at start
+DAC_DB = 0  # TLV320 DAC volume at start
+HP_DB = -8.1  # TLV320 analog headphone volume, 0 (loud) to -78.3
 DAC_DB_MIN = -63  # wheel range
-DAC_DB_MAX = -6  # loud masters distorted at 0 dB on headphones (10-27)
+DAC_DB_MAX = 0  # above this the DAC clips; loud masters distorted at 0 dB on headphones (10-27)
 MCLK_HZ = 15_000_000
 RESTART_S = 3  # reverse after this far into a track restarts it
 HIGH_RATE = 48000  # above this, no e-ink redraw for QUIET_S after a track starts:
-QUIET_S = 6  # a redraw blocks 0.1 s, longer than a 64 ms half (10-27)
+QUIET_S = 0  # was 6 for screen.py's 0.1 s redraw; fastscreen blocks 13-16 ms, and C decodes faster
 SCAN_S = 5  # seconds per rewind / fast-forward step (one step every 0.3 s held)
 
 mclk = pwmio.PWMOut(board.D5, frequency=MCLK_HZ, duty_cycle=32768)
@@ -182,6 +183,7 @@ class Player:
             set_clocks(self.rate)
             dac.headphone_output = True
             dac.speaker_output = False  # class-D amp off, nothing on it
+            dac.headphone_volume = HP_DB  # headphone_output sets -20.1
             dac.dac_volume = self.db
         print("%s  %d Hz %d-bit %d:%02d" % (path, self.rate, d.source_bits_per_sample,
                                            d.duration // 60, d.duration % 60))
