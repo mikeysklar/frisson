@@ -237,7 +237,8 @@ class Menus:
                 ("", title[:WIDTH + 4]),
                 ("", "%d/%d  %s  %d dB" % (n, total, "paused" if p.paused else "playing", p.db)),
             ]
-        return {"kind": "now", "title": "NOW PLAYING", "right": "", "rows": rows,
+        right = p.format if p.current is not None else ""
+        return {"kind": "now", "title": "NOW PLAYING", "right": right, "rows": rows,
                 "sel": -1, "footer": self.notice or "wheel volume   up back"}
 
     def text(self):

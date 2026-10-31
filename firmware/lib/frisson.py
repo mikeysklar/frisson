@@ -154,6 +154,7 @@ class Player:
         self.queue = []
         self.pos = 0
         self.current = None  # library track index
+        self.format = ""  # the current file's format and bit rate, for the screen
         self.started = 0
         self.quiet_until = 0  # no e-ink redraw before this (time.monotonic)
         self.skipped = False  # a damaged file was passed over; Menus.tick reports it
@@ -226,11 +227,17 @@ class Player:
             if path[-4:].lower() == ".mp3":
                 mp3.open(self.file)
                 self.decoder = mp3
-            elif self.flac_decoder is None:
-                self.decoder = self.flac_decoder = adafruit_flac.FLACDecoder(self.file)
+                self.format = "MP3 %dk" % (mp3.bit_rate // 1000)
             else:
-                self.flac_decoder.open(self.file)
-                self.decoder = self.flac_decoder
+                self.file.seek(0, 2)
+                size = self.file.tell()
+                self.file.seek(0)
+                if self.flac_decoder is None:
+                    self.decoder = self.flac_decoder = adafruit_flac.FLACDecoder(self.file)
+                else:
+                    self.flac_decoder.open(self.file)
+                    self.decoder = self.flac_decoder
+                self.format = "FLAC %dk" % (size // 125 // max(int(self.decoder.duration), 1))
             d = self.decoder
             if d.sample_rate != self.rate:
                 self.rate = d.sample_rate

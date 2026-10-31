@@ -32,6 +32,7 @@ class MP3Decoder:
         self.sample_rate = 0
         self.channel_count = 0
         self.source_bits_per_sample = 16
+        self.bit_rate = 0  # the first frame's
         self.duration = 0
         self.samples_decoded = 0
         self._start = 0
@@ -54,6 +55,7 @@ class MP3Decoder:
         info = self._info
         self.sample_rate = info[2]
         self.channel_count = info[3]
+        self.bit_rate = info[4]
         bytes_per_s = info[4] // 8 or 1
         self.duration = (self._size - self._start) // bytes_per_s
 
