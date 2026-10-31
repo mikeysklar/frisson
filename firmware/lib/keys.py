@@ -13,9 +13,9 @@ replace the tap.
 
 Each seesaw read sleeps read_delay and costs a few hundred microseconds on the
 bus, time the FLAC decoder needs at 24/96. So each poll() does one read, in
-turn: the NeoKey, the wheel, the ANO buttons, the wheel. The wheel gets every
-other read, for scrolling, and its count keeps adding up between reads, so no
-steps are lost.
+turn: the NeoKey, the wheel, the NeoKey, the ANO buttons. The NeoKey gets every
+other read, so a quick tap's press and release are both seen. The wheel's count
+keeps adding up between reads, so no steps are lost.
 
 Libraries: adafruit_seesaw, adafruit_bus_device.
 """
@@ -32,14 +32,14 @@ _ANO_BUTTONS = ((1 << 1, "select"), (1 << 2, "up"), (1 << 3, "left"), (1 << 4, "
 _ANO_PINS = 0x3E
 _ENCODER_BASE = 0x11
 _ENCODER_DELTA = 0x40
-_TURNS = (0, 2, 1, 2)  # NeoKey, wheel, ANO buttons, wheel
+_TURNS = (0, 2, 0, 1)  # NeoKey, wheel, NeoKey, ANO buttons
 
 
 class Keys:
     """Either board may be missing (`neokey` or `ano` is then None); with
     neither, ValueError."""
 
-    def __init__(self, i2c, neokey_addr=0x30, ano_addr=0x49, interval=0.02, read_delay=0.001):
+    def __init__(self, i2c, neokey_addr=0x30, ano_addr=0x49, interval=0.01, read_delay=0.001):
         from adafruit_seesaw.seesaw import Seesaw  # noqa: PLC0415
 
         self.interval = interval

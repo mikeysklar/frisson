@@ -32,6 +32,9 @@ RESTART_S = 3  # reverse after this far into a track restarts it
 HIGH_RATE = 48000  # above this, no e-ink redraw for QUIET_S after a track starts:
 QUIET_S = 0  # was 6 for screen.py's 0.1 s redraw; fastscreen blocks 13-16 ms, and C decodes faster
 SCAN_S = 5  # seconds per rewind / fast-forward step (one step every 0.3 s held)
+# What a damaged or unreadable file raises: FLACError is a ValueError, short
+# reads give IndexError or struct's RuntimeError, a wild STREAMINFO a MemoryError.
+BAD_FILE = (ValueError, OSError, IndexError, RuntimeError, MemoryError)
 
 mclk = pwmio.PWMOut(board.D5, frequency=MCLK_HZ, duty_cycle=32768)
 
@@ -60,7 +63,14 @@ try:
     vfs.stat(path)
 except OSError:
     path = first_track()
-decoder = adafruit_flac.FLACDecoder(vfs.open(path, "rb")) if path else None
+decoder = None
+try:
+    if path and path[-5:].lower() == ".flac":
+        decoder = adafruit_flac.FLACDecoder(vfs.open(path, "rb"))
+except BAD_FILE as e:  # opened on the first track that plays instead
+    print("no decoder yet:", path, e)
+import mp3file  # noqa: E402  after the FLAC buffers, before the library takes the rest
+mp3 = mp3file.MP3Decoder()
 lib = library.Library(vfs, lambda n, total: n % 50 or print("indexing", n, "of", total))
 print(len(lib.tracks), "tracks,", len(lib.albums), "albums")
 
@@ -136,7 +146,8 @@ class Player:
 
     def __init__(self):
         self.flac = adafruit_flac.FLACPlayer(audio, buffer=out_buf, level=LEVEL)
-        self.decoder = decoder
+        self.decoder = decoder  # the current file's decoder
+        self.flac_decoder = decoder
         self.file = decoder.file if decoder else None  # closed on the first play
         self.rate = 0
         self.db = DAC_DB
@@ -145,6 +156,7 @@ class Player:
         self.current = None  # library track index
         self.started = 0
         self.quiet_until = 0  # no e-ink redraw before this (time.monotonic)
+        self.skipped = False  # a damaged file was passed over; Menus.tick reports it
 
     @property
     def playing(self):
@@ -157,39 +169,91 @@ class Player:
     def position(self):
         return self.pos + 1, len(self.queue)
 
-    def play(self, queue, pos):
+    def play(self, queue, pos, skip=False):
+        """Play queue[pos], or with skip the first track from there that can
+        play. False if it can't, and what was playing carries on: untouched for
+        an MP3, restarted where it was for a file that fails to open."""
+        step = 1 if skip else 0
+        pos = self._find(queue, pos, step)
+        if pos < 0:
+            return False
+        had = self.current is not None
+        old_queue, old_pos, paused = self.queue, self.pos, self.paused
+        at = self.decoder.samples_decoded / self.rate if had else 0
         self.queue = queue
-        self._start(pos)
+        if self._start(pos, step):
+            return True
+        self.skipped = False  # the caller reports this one
+        self.queue, self.pos = old_queue, old_pos
+        if had and self._start(old_pos, 0):
+            self._seek(at)
+            if paused:
+                self.flac.pause()
+        return False
 
-    def _start(self, pos):
+    def _find(self, queue, pos, step):
+        """The first playable index from pos going by step, else -1. With
+        step 0, only pos itself."""
+        while 0 <= pos < len(queue):
+            if menus.playable(lib.tracks[queue[pos]][0]):
+                return pos
+            if not step:
+                break
+            pos += step
+        return -1
+
+    def _start(self, pos, step=1):
+        """Stop, then play from pos, passing over what can't play. False, with
+        nothing playing, if nothing can."""
         self.flac.stop()
         if self.file:
             self.file.close()
             self.file = None
-        if not 0 <= pos < len(self.queue):
-            self.current = None
-            return
+        pos = self._find(self.queue, pos, step)
+        while pos >= 0:
+            if self._load(pos):
+                return True
+            self.skipped = True
+            pos = self._find(self.queue, pos + step, step) if step else -1
+        self.current = None
+        return False
+
+    def _load(self, pos):
+        i = self.queue[pos]
+        path = lib.tracks[i][0]
+        try:
+            self.file = vfs.open(path, "rb")
+            if path[-4:].lower() == ".mp3":
+                mp3.open(self.file)
+                self.decoder = mp3
+            elif self.flac_decoder is None:
+                self.decoder = self.flac_decoder = adafruit_flac.FLACDecoder(self.file)
+            else:
+                self.flac_decoder.open(self.file)
+                self.decoder = self.flac_decoder
+            d = self.decoder
+            if d.sample_rate != self.rate:
+                self.rate = d.sample_rate
+                set_clocks(self.rate)
+                dac.headphone_output = True
+                dac.speaker_output = False  # class-D amp off, nothing on it
+                dac.headphone_volume = HP_DB  # headphone_output sets -20.1
+                dac.dac_volume = self.db
+            print("%s  %d Hz %d-bit %d:%02d" % (path, self.rate, d.source_bits_per_sample,
+                                               d.duration // 60, d.duration % 60))
+            self._play()
+        except BAD_FILE as e:
+            print("can't play", path, e)
+            if self.file:
+                self.file.close()
+                self.file = None
+            self.rate = 0  # set the clocks again next time
+            return False
         self.pos = pos
-        self.current = self.queue[pos]
-        path = lib.tracks[self.current][0]
-        self.file = vfs.open(path, "rb")
-        if self.decoder is None:
-            self.decoder = adafruit_flac.FLACDecoder(self.file)
-        else:
-            self.decoder.open(self.file)
-        d = self.decoder
-        if d.sample_rate != self.rate:
-            self.rate = d.sample_rate
-            set_clocks(self.rate)
-            dac.headphone_output = True
-            dac.speaker_output = False  # class-D amp off, nothing on it
-            dac.headphone_volume = HP_DB  # headphone_output sets -20.1
-            dac.dac_volume = self.db
-        print("%s  %d Hz %d-bit %d:%02d" % (path, self.rate, d.source_bits_per_sample,
-                                           d.duration // 60, d.duration % 60))
-        self._play()
+        self.current = i
         self.started = time.monotonic()
         self.quiet_until = self.started + QUIET_S if self.rate > HIGH_RATE else 0
+        return True
 
     def _play(self):
         f = self.flac
@@ -208,10 +272,11 @@ class Player:
     def reverse(self):
         if self.current is None:
             return
-        if time.monotonic() - self.started > RESTART_S or self.pos == 0:
+        previous = self._find(self.queue, self.pos - 1, -1)
+        if time.monotonic() - self.started > RESTART_S or previous < 0:
             self._start(self.pos)
         else:
-            self._start(self.pos - 1)
+            self._start(previous, -1)
 
     def forward(self):
         if self.current is not None:
@@ -221,10 +286,20 @@ class Player:
         """Rewind (-1) or fast-forward (1) one SCAN_S step."""
         if self.current is None:
             return
-        d = self.decoder
-        at = d.seek(max(0, d.samples_decoded / self.rate + direction * SCAN_S))
-        self._play()  # past the end, this plays silence and update() moves on
-        self.started = time.monotonic() - at  # so reverse() still restarts the track
+        self._seek(self.decoder.samples_decoded / self.rate + direction * SCAN_S)
+
+    def _seek(self, seconds):
+        try:
+            at = self.decoder.seek(max(0, seconds))
+            self._play()  # past the end, this plays silence and update() moves on
+            self.started = time.monotonic() - at  # so reverse() still restarts the track
+        except BAD_FILE as e:
+            self._bad_file(e)
+
+    def _bad_file(self, e):
+        print("can't play on:", e)
+        self.skipped = True
+        self._start(self.pos + 1)
 
     def volume(self, steps):
         self.db = max(DAC_DB_MIN, min(DAC_DB_MAX, self.db + steps))
@@ -234,7 +309,11 @@ class Player:
         """Keep the audio fed. Returns True when a track just ended."""
         if self.current is None:
             return False
-        self.flac.update()
+        try:
+            self.flac.update()
+        except BAD_FILE as e:
+            self._bad_file(e)
+            return True
         if not self.flac.playing and not self.flac.paused:
             print("  done, underruns", self.flac.underruns)
             self._start(self.pos + 1)
@@ -268,7 +347,7 @@ for album in lib.albums if start else ():
             player.play(queue, n)
             ui.now_playing()
 if player.current is None and (keys is None or keys.neokey is None):
-    player.play(lib.albums[0][2], 0)  # nothing to choose with: play the first album
+    player.play(lib.albums[0][2], 0, True)  # nothing to choose with: play the first album
     ui.now_playing()
 
 printed = -1
@@ -276,6 +355,7 @@ last = time.monotonic_ns()
 while True:
     if player.update():
         ui.version += 1  # next track: the footer and now playing change
+    ui.tick()
     if keys:
         events = keys.poll()
         for kind, value in events:

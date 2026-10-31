@@ -3,8 +3,9 @@
 """Frisson's menus: what the keys do, and what the screen shows.
 
   ANO wheel     move the highlight (volume on the now playing screen)
-  ANO select    open the album, or play the track
-  ANO up        back
+  ANO select    open the artist or album, or play the track
+                (an artist with one album opens straight to its tracks)
+  ANO up        back, to albums then artists
   ANO down      now playing
   ANO left/right  page down / page up
   NeoKey 1 to 4 play, pause, reverse, forward
@@ -14,16 +15,25 @@
 
 No hardware here. Menus takes events from keys.Keys.poll(), calls a player
 object (see frisson.py), and the screen reads view(). `version` goes up
-whenever the view changes.
+whenever the view changes. Call tick() from the main loop to time out notices.
 """
+
+import time
 
 ROWS = 4  # list rows on the screen
 WIDTH = 19  # characters per row after a tag, 23 without (10 px each)
+NOTICE_S = 3  # how long a message replaces the footer
+VARIOUS = "Various"  # the row of albums with no one artist
+
+
+def playable(path):
+    """Can the player decode this file? The index only lists FLAC and MP3."""
+    return path[-5:].lower() == ".flac" or path[-4:].lower() == ".mp3"
 
 
 class Screen:
     def __init__(self, kind, title, items, cursor=0):
-        self.kind = kind  # "albums", "tracks", "now"
+        self.kind = kind  # "albums" (also the artist list), "tracks", "now"
         self.title = title
         self.items = items  # list of (tag, text, target)
         self.cursor = cursor
@@ -35,14 +45,41 @@ class Menus:
         self.lib = library
         self.player = player
         self.version = 0
-        self.stack = [self._albums()]
+        self.notice = ""  # replaces the footer until notice_until
+        self.notice_until = 0
+        self.stack = [self._artists()]
 
     # screens
 
-    def _albums(self):
-        items = [("", "%s - %s" % (a[0], a[1]) if a[0] else a[1], ("album", i))
-                 for i, a in enumerate(self.lib.albums)]
-        return Screen("albums", "ALBUMS  %d" % len(items), items)
+    def _artists(self):
+        """Built once, at start, and kept: the names are the library's own
+        strings. One row per artist, target ("artist", first, end), the range
+        of lib.albums holding their albums. Albums with no artist (compilations,
+        mixed folders) sort in among the artists by their own names, so they
+        are gathered into one row at the top, the shortest reach."""
+        albums = self.lib.albums
+        items = []
+        various = None
+        key = None
+        for i, a in enumerate(albums):
+            if not a[0]:
+                various = (various[0] if various else i, i + 1)
+            elif a[0].lower() == key:
+                items[-1] = ("", items[-1][1], ("artist", items[-1][2][1], i + 1))
+            else:
+                key = a[0].lower()
+                items.append(("", a[0], ("artist", i, i + 1)))
+        if various:
+            items.insert(0, ("", VARIOUS, ("artist",) + various))
+        return Screen("albums", "ARTISTS  %d" % len(items), items)
+
+    def _albums(self, first, end):
+        """One artist's albums: the range can hold others' no-artist albums."""
+        albums = self.lib.albums
+        key = albums[first][0].lower()
+        items = [("", albums[i][1], ("album", i)) for i in range(first, end)
+                 if albums[i][0].lower() == key]
+        return Screen("albums", (albums[first][0] or VARIOUS).upper(), items)
 
     def _tracks(self, album, cursor=0):
         artist, title, indexes = self.lib.albums[album]
@@ -76,12 +113,36 @@ class Menus:
 
     def _open(self, target):
         kind = target[0]
-        if kind == "album":
+        if kind == "artist":
+            _, first, end = target
+            self._push(self._albums(first, end) if end - first > 1 else self._tracks(first))
+        elif kind == "album":
             self._push(self._tracks(target[1]))
         elif kind == "track":
             _, album, n = target
-            self.player.play(self.lib.albums[album][2], n)
-            self.now_playing()
+            if self._play(self.lib.albums[album][2], n):
+                self.now_playing()
+
+    def _play(self, queue, n, skip=False):
+        """Ask the player for queue[n]; if it refuses, say so. True if it plays."""
+        if self.player.play(queue, n, skip):
+            return True
+        self.notify("can't play that file")
+        return False
+
+    def notify(self, text):
+        self.notice = text
+        self.notice_until = time.monotonic() + NOTICE_S
+        self.version += 1
+
+    def tick(self):
+        """Report a file the player skipped, and time out the notice."""
+        if self.player.skipped:
+            self.player.skipped = False
+            self.notify("skipped a bad file")
+        elif self.notice and time.monotonic() >= self.notice_until:
+            self.notice = ""
+            self.version += 1
 
     def now_playing(self):
         if self.top.kind != "now":
@@ -133,8 +194,8 @@ class Menus:
         if not s.items:
             return
         target = s.items[s.cursor][2]
-        if target[0] == "album":
-            self.player.play(self.lib.albums[target[1]][2], 0)
+        if target[0] in ("artist", "album"):  # an artist plays their first album
+            self._play(self.lib.albums[target[1]][2], 0, True)
         elif target[0] == "track":
             self._open(target)
 
@@ -150,6 +211,7 @@ class Menus:
         if p.current is not None:
             t = self.lib.tracks[p.current]
             footer = "%s %s" % ("||" if p.paused else ">", t[3])
+        footer = self.notice or footer
         if s.kind == "now":
             return self._view_now(footer)
         if s.cursor < s.top:
@@ -176,7 +238,7 @@ class Menus:
                 ("", "%d/%d  %s  %d dB" % (n, total, "paused" if p.paused else "playing", p.db)),
             ]
         return {"kind": "now", "title": "NOW PLAYING", "right": "", "rows": rows,
-                "sel": -1, "footer": "wheel volume   up back"}
+                "sel": -1, "footer": self.notice or "wheel volume   up back"}
 
     def text(self):
         """The view as plain text, for the serial console."""
