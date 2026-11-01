@@ -18,6 +18,7 @@ tags are never read: names only, so a scan only opens the FLACs.
 """
 
 import gc
+from array import array
 
 INDEX = "/FRISSON.IDX"
 _TEMP = "/FRISSON.TMP"  # written in full, then renamed to INDEX
@@ -166,12 +167,46 @@ def _album_names(tracks):
     return artist, tracks[0][4]
 
 
+class _Tracks:
+    """The tracks, read from the index file when asked for.
+
+    One tuple and four strings per track made 5700 tracks a heap that took
+    125 ms to collect, and a half of 24/96 lasts 64 ms, so each collection was
+    an underrun. The text alone in RAM still took 73 ms: the collector scans it
+    for pointers. Only the line offsets stay in RAM: 29 ms (10-31)."""
+
+    def __init__(self, raw, starts):
+        self._raw = raw  # the file's bytes, until use_file
+        self._file = None
+        self._starts = starts  # where each line starts, and where the last ends
+
+    def use_file(self, file):
+        self._file = file
+        self._raw = None
+
+    def __len__(self):
+        return len(self._starts) - 1
+
+    def __getitem__(self, i):
+        a = self._starts[i]
+        b = self._starts[i + 1] - 1
+        if self._file:
+            self._file.seek(a)
+            line = self._file.read(b - a)
+        else:
+            line = self._raw[a:b]
+        p = str(line, "utf-8").split("\t")
+        if len(p) != 5:
+            raise ValueError("index damaged")
+        return p[0], p[1], p[2], p[3], int(p[4])
+
+
 class Library:
     """Tracks and albums.
 
-    tracks: list of (path, artist, album, title, number). The tracks of a
-            folder are together, by disc, track number and path
-    albums: list of (artist, album, [track indexes]), one per folder, by
+    tracks: (path, artist, album, title, number) by index, in order. The tracks
+            of a folder are together, by disc, track number and path
+    albums: list of (artist, album, range of track indexes), one per folder, by
             artist (or album, if it has no artist), album, path. artist is ""
             if the tracks of the folder have different artists
     """
@@ -188,8 +223,7 @@ class Library:
         """Read INDEX, or raise OSError or ValueError if it isn't complete.
 
         The whole file is read at once and split by hand: iterating a file
-        reads one byte at a time, and indexing into a long non-ASCII str walks
-        it from the start. The index is sorted already, and sorting 5700
+        reads one byte at a time. The index is sorted already, and sorting 5700
         tracks here would take too long (see build)."""
         size = self.vfs.stat(INDEX)[6]
         with self.vfs.open(INDEX, "rb") as f:
@@ -199,23 +233,20 @@ class Library:
         if len(last) != 2 or last[0] != _END or last[1][-1:] != "\n":
             raise ValueError("index incomplete")
         count = int(last[1])
-        tracks = [None] * count
-        artist = album = None
+        starts = array("I", [0]) * (count + 1)
         i = n = 0
         while i < cut:
-            j = raw.find(b"\n", i)
-            p = str(raw[i:j], "utf-8").split("\t")
-            if len(p) != 5 or n == count:
+            if n == count:
                 raise ValueError("index damaged")
-            # one copy of each name, not one per track
-            artist = artist if p[1] == artist else p[1]
-            album = album if p[2] == album else p[2]
-            tracks[n] = (p[0], artist, album, p[3], int(p[4]))
+            starts[n] = i
             n += 1
-            i = j + 1
+            i = raw.find(b"\n", i) + 1
         if n != count:
             raise ValueError("index damaged")
-        self._set(tracks)
+        starts[n] = cut
+        tracks = _Tracks(raw, starts)
+        self._set(tracks)  # reads every line, so damage shows here
+        tracks.use_file(self.vfs.open(INDEX, "rb"))
 
     def build(self, progress=None):
         """Walk the card, read the FLACs' tags and rewrite INDEX."""
@@ -301,15 +332,17 @@ class Library:
         """Group tracks, already in order, into albums, one per folder."""
         self.tracks = tracks
         self.albums = []
-        folder = None
-        for i, t in enumerate(tracks):
+        folder = artist = album = None
+        first = 0
+        for i in range(len(tracks)):
+            t = tracks[i]
             path = t[0]
             f = path[: path.rfind("/")]
             if f != folder:
-                folder = f
-                self.albums.append((t[1], t[2], [i]))
-            else:
-                a = self.albums[-1]
-                a[2].append(i)
-                if a[0] and a[0] != t[1]:
-                    self.albums[-1] = ("", a[1], a[2])
+                if folder is not None:
+                    self.albums.append((artist, album, range(first, i)))
+                folder, first, artist, album = f, i, t[1], t[2]
+            elif artist and artist != t[1]:
+                artist = ""
+        if folder is not None:
+            self.albums.append((artist, album, range(first, len(tracks))))
